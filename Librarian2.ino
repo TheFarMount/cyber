@@ -1,7 +1,9 @@
-
+#include <NewPing.h>
 #include <Servo.h>
 #include <AFMotor.h>
 #include <DHT.h>
+#include<LiquidCrystal_I2C.h>
+#include<Wire.h>
 
 //robot modes
 #define ERRORMODE   0   //Initialization mode, which represents an abnormal exit
@@ -16,8 +18,7 @@
 /*                                   All functions' declarations                                 */
 /*************************************************************************************************/
 void touchISR();
-void sonarISR();
-void sonarAvoid();
+int sonarAvoid();
 char readKeypad();
 void point_book(double book_height);
 
@@ -30,33 +31,41 @@ int stopNoise();
 /*                                           全局变量                                             */
 /*************************************************************************************************/
 
+#define max_distance  200
+
 /*********/
 /*引脚设定*/
 /*********/
 
 //keypad引脚
-static int col_pins[4] = {44, 42, 40, 38};    // 定义行引脚
-static int row_pins[4] = {52, 50, 48, 46};    // 定义列引脚
+static int col_pins[4] = {47, 49, 51, 53};    // 定义行引脚
+static int row_pins[4] = {39, 41, 43, 45};    // 定义列引脚
 //舵机引脚
 const int bookpointer_servoPin1 = 38; // 上(下)舵机
 const int bookpointer_servoPin2 = 40; // 上(下)舵机
 //触摸传感器引脚
-int touch_DOpin = 27;  // define Metal Touch Sensor Interface
-int touch_AOpin = A13; //
+int touch_DOpin = 37;  // define Metal Touch Sensor Interface
+int touch_AOpin = A15; //
 //声纳引脚
-const int trigPin = 12;
-const int echoPin = 2; // Using pin 2 for interrupt
+const int trigPin = 35;
+const int echoPin = 33; // Using pin 2 for interrupt
 //DHT引脚
-#define DHTPIN A12
+#define DHTPIN A14
 #define DHTTYPE DHT11
+//LCD
+LiquidCrystal_I2C lcd(0x27,  16, 2);
+
 //LED引脚
-const int led_DHTB = 22;        //温度异常
-const int led_DHTR = 23;        //湿度异常
-const int led_DHTG = 24;        //温湿度正常
-const int led_barrier = 25;     //有障碍物
+const int led_DHTB = 52;        //温度异常
+const int led_DHTR = 50;        //湿度异常
+const int led_DHTG = 48;        //温湿度正常
+const int led_barrier = 46;     //有障碍物
 
-const int led_mode[6] = {1,2,3,4,5,6};   //表示所处模式
+const int led_mode[4] = {38,36,42,44};   //表示所处模式(R, W, G, Y)
 
+const int trackingLeftPin=28;
+const int trackingFrontPin=30;
+const int trackingRightPin=32;
 
 /*********/
 /*标志信息*/
@@ -76,29 +85,33 @@ const int motor_br_pin = 4; AF_DCMotor motor_br(motor_br_pin);
 int max_speed = 255;
 
 
+/**********/
+/*舵机信息*/
+/*********/
+#define servo_face_pin 27
+Servo servo_face;
+#define servo_arm_pin1 22
+Servo servo_arm1;
+#define servo_arm_pin2 24
+Servo servo_arm2;
+#define servo_camera_pin 26
+Servo servo_camera;
+
 /*********/
 /*书籍信息*/
 /*********/
 
 const int book_amount = 3;    //书籍总数据量
 int target_book = 0;          //待取书籍
-int book_code[book_amount] =  //书记编码
-  {0000, 0001, 0010};
-int book_locate[3][book_amount]=  //书籍坐标
+const int book_code[book_amount] =  //书记编码
+  {1000, 1001, 1010};
+const int book_locate[3][book_amount]=  //书籍坐标
 {
   {   1,    1,    1},          //小车目标横坐标
   {   2,    2,    2},          //小车目标列坐标
-  {   3,    3,    3}           //小车目标高度
+  {   7,    3,    3}           //小车目标高度
 };
 
-/**********/
-/*声纳测距*/
-/**********/
-
-const float minDistance = 20.0; //极限距离(cm)
-volatile unsigned long pulseStart;     
-volatile unsigned long pulseEnd;
-volatile bool newMeasurement = false;
 
 
 /*************************************************************************************************/
@@ -108,8 +121,13 @@ volatile bool newMeasurement = false;
 void setup()
 {
   Serial.begin(9600);
+  
   /*--------------------------------引脚设置-------------------------------------------------*/
-
+  //舵机
+  servo_face.attach(servo_face_pin);
+  servo_arm1.attach(servo_arm_pin1);
+  servo_arm2.attach(servo_arm_pin2);
+  servo_camera.attach(servo_camera_pin);
   //LED引脚
   for(int i=0; i<6; i++)
   {
@@ -140,7 +158,11 @@ void setup()
   /*--------------------------------中断设置-------------------------------------------------*/
   //中断设置
   attachInterrupt(digitalPinToInterrupt(touch_DOpin), touchISR, CHANGE);   
-  attachInterrupt(digitalPinToInterrupt(echoPin), sonarISR, CHANGE);
+
+  //initialize lcd screen
+  lcd.init();
+  // turn on the backlight
+  lcd.backlight();
 }
 
 void loop()
@@ -148,31 +170,45 @@ void loop()
   switch(mode)
   {
     case ERRORMODE:
+      servo_face.write(180);
       digitalWrite(led_mode[0], HIGH);
       Serial.println("ERROR: Abnormal exit");
       delay(1000);
+      digitalWrite(led_mode[0], LOW);
+      delay(1000);
       break;
     case SHAKEHANDS:
+      servo_face.write(180);
       digitalWrite(led_mode[1], HIGH);
       Serial.println("INFO: Shaking hands");
       mode = shakeHands();
+      delay(5000);
       break;
     case CRUISE:
+      lcd.setCursor(0,0);
+      lcd.print("Quiet Please");
+      lcd.setCursor(0,1);
+      lcd.print("Have a nice day");
+      servo_face.write(0);
       digitalWrite(led_mode[2], HIGH);
-      Serial.println("INFO: Cruising");
+      //Serial.println("INFO: Cruising");
       mode = robotCruise();
       break;
     case SEARCHBOOK:
+      servo_face.write(110);
       digitalWrite(led_mode[3], HIGH);
       mode = searchBook();
       break;
     case LEADWAY:
-      digitalWrite(led_mode[4], HIGH);
+      servo_face.write(65);
+      digitalWrite(led_mode[3], HIGH);
+      delay(200);
       //Serial.println("INFO: Leading");
       mode = leadWay();
+      digitalWrite(led_mode[3],LOW);
+      delay(200);
       break;
     case ADMINISTER:
-      digitalWrite(led_mode[5], HIGH);
       stopNoise();
       break;
   }
@@ -202,66 +238,12 @@ void touchISR()
   }
 }
 
-void sonarISR() 
-{
-  if (digitalRead(echoPin) == HIGH) 
-  {
-    // Rising edge: record the start time
-    pulseStart = micros();
-  } else {
-    // Falling edge: record the end time and set flag
-    pulseEnd = micros();
-    newMeasurement = true;
-  }
-}
-
 /*************************************************************************************/
 /*                          moving functions                                        */
 /*************************************************************************************/
 
 
-/***********************/
-/*功能:声呐避障         */
-/*返回值:是否有障碍物    */
-/***********************/
 
-void sonarAvoid()
-{
-  static unsigned long lastTriggerTime = 0;
-
-  // Trigger the ultrasonic sensor every 100ms
-  if (millis() - lastTriggerTime >= 100) {
-    // Trigger the ultrasonic sensor
-    digitalWrite(trigPin, LOW);
-    delayMicroseconds(2);
-    digitalWrite(trigPin, HIGH);
-    delayMicroseconds(10);
-    digitalWrite(trigPin, LOW);
-    lastTriggerTime = millis(); // Reset the timer
-  }
-  if (newMeasurement) 
-  {
-    newMeasurement = false;
-    unsigned long duration = pulseEnd - pulseStart;
-    float distance = (duration * 0.0343) / 2;
-
-    // Print the distance to the Serial Monitor
-    //Serial.print("Distance: ");
-    //Serial.println(distance);
-
-    // Update the LED state based on the measured distance
-    if (distance < minDistance) 
-    {
-      barrier_tag = 1;
-      digitalWrite(led_barrier, HIGH);
-    }
-    else 
-    {
-      barrier_tag = 0;
-      digitalWrite(led_barrier, LOW);
-    }
-  }
-}
 
 void motorRun()
 {
@@ -379,7 +361,7 @@ void testDHT()
 {
   const static int temp_max = 30;
   const static int temp_min = 0;
-  const static int hum_max = 50;
+  const static int hum_max = 70;
   const static int hum_min = 20;
 
   static int begin_tag = 1;
@@ -396,19 +378,23 @@ void testDHT()
   //温度监测
   if(!(temp_min<temp && temp<temp_max)){
     digitalWrite(led_DHTB,HIGH);
+    Serial.println((temp));
   }
   else{
     digitalWrite(led_DHTB,LOW);
   }
   //湿度监测
-  if(!(hum_min<humid && humid<hum_max)){
+  if(!(hum_min<humid && humid<hum_max))
+  {
     digitalWrite(led_DHTR,HIGH);
+    Serial.println((humid));
   }
   else{
     digitalWrite(led_DHTR,LOW);
   }
   //温湿度正常
-  if((temp_min<temp && temp<temp_max)&&(hum_min<humid && humid<hum_max)){
+  if((temp_min<temp && temp<temp_max)&&(hum_min<humid && humid<hum_max))
+  {
     digitalWrite(led_DHTG,HIGH);
   }
   else{
@@ -417,13 +403,44 @@ void testDHT()
 
 }
 
+/***********************/
+/*功能:声呐避障         */
+/*返回值:是否有障碍物    */
+/***********************/
+
+int sonarAvoid()
+{
+  int tag = 0;
+  const float min_distance = 20.0; //极限距离(cm)
+  static NewPing sonar(trigPin, echoPin, max_distance); // NewPing setup of pins and maximum distance.
+  int distance = sonar.ping_cm();
+  if(distance < min_distance)
+  {
+    digitalWrite(led_barrier, HIGH);
+   // Serial.println(distance);
+    tag = 0;
+  }
+  else            
+  {
+    digitalWrite(led_barrier, LOW);
+   // Serial.println(distance);
+    tag = 1;
+  }
+}
+
 /**********************/
 /*功能: 巡航状态主函数  */
 /*返回值: 下一循环状态  */
 /**********************/
 int robotCruise()
 {
+  servo_arm1.write(0);
+  servo_arm2.write(180);
+
+
   int next_mode = 0;
+  int barrier_tag = sonarAvoid();
+  touchISR();
   testDHT();
   //若被触摸进入领路模式
   if(touch_tag == 1)
@@ -432,8 +449,13 @@ int robotCruise()
   }
   else            //根据python指令移动
   {
-    motorRun();
+    if(barrier_tag)
+    {
+      //move
+    }
+    next_mode = CRUISE;
   }
+  delay(50);
   return next_mode;
 }
 
@@ -485,12 +507,12 @@ char readKeypad()
 /******************************/
 int searchBook()
 {
-  static const int max_wait_time =  1000;  //max wait time(ms)
+  static const int max_wait_time =  10000;  //max wait time(ms)
   static int begin_tag = 1; //weather just enter the mode
   static int start_time = 0;
   static bool  release_tag = 1;       //两次读数中间必松手一次，防止重复读入
   int present_time;
-  static int input_num = 0;    //num has been input
+  static long int input_num = 0;    //num has been input
   int next_mode = 0;
   int key;
   
@@ -567,60 +589,49 @@ int searchBook()
           input_num = 0;
           break;
         case '#':
+          begin_tag = 1;
+          Serial.println("#");
           int temp_tag = 1;       //标记是否找到书
           for(int i=0; i<book_amount; i++)
           {
             if(book_code[i] == input_num)
             {
+
               temp_tag = 0;
               target_book = i;
             }
-            if(temp_tag)
-              next_mode = CRUISE;        //未找到书
-            else
-              next_mode = LEADWAY;
           }
+          if(temp_tag)
+          {
+            lcd.clear();
+            lcd.setCursor(0,0);
+            lcd.print("Sorry not found");
+            return CRUISE ;        //未找到书
+          }
+          else
+            return LEADWAY;
           break;
       }
       next_mode = SEARCHBOOK;
+      Serial.println((input_num));
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.print("Inputing");
+      lcd.setCursor(0,1);
+      lcd.print(input_num);
       delay(200);//防止重复读入
+    }
+    else
+    {
+      Serial.println((input_num));
+      next_mode = SEARCHBOOK;
     }
   }
   
   return next_mode;
 }
 
-/***********************************/
-/* 功能: 使用机械臂取书              */
-/* 参数: 书籍所在高度                 */
-/************************************/
-void point_book(double book_height)
-{
-  // 舵机对象
-  const static Servo bookpointer_servo1;
-  const static Servo bookpointer_servo2;
-  const static double car_book_d = 8;        // 底部舵机-书水平距离(认为定值)
-  const static double arm_length;            // 机械臂长度
-  static bool begin_tag = 1;
 
-  if(begin_tag)
-  {
-    // 舵机设置Attaches the pin to the servo object
-    bookpointer_servo1.attach(bookpointer_servoPin1); 
-    bookpointer_servo2.attach(bookpointer_servoPin2); 
-    begin_tag = 0;
-  }
-
-  double base_length = sqrt(car_book_d * car_book_d + book_height * book_height);
-  // theta均为弧度
-  double theta1_1 = atan(book_height / car_book_d);
-  double theta1_2 = acos(base_length / (2 * arm_length));
-  double theta1 = theta1_1 + theta1_2;
-  double theta2 = 2 * asin(base_length / (2 * arm_length));
-
-  bookpointer_servo1.write(180-(theta1 * 180 / PI)-35);
-  bookpointer_servo2.write(180-(theta2 * 180 / PI));
-}
 
 
 /*************************************/
@@ -629,19 +640,25 @@ void point_book(double book_height)
 /*************************************/
 int leadWay()
 {
+
   int next_mode = 0;
-  static const int max_wait_time =  1000;  //max wait time(ms)
+  static const int max_wait_time =  10000;  //max wait time(ms)
   static int start_time = 0;
   int present_time;
   static int step_tag = 0;
+  touchISR();
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("Follow me~~~");
 
   if(step_tag == 0)    //移动阶段----------------------------------------------待完成
   {
+    step_tag = 1;
     next_mode = LEADWAY;                          
   }
   else if(step_tag == 1)
   {
-    point_book(book_locate[3][target_book]);
+    point_book(book_locate[2][target_book]);//book_locate[3][target_book]
     step_tag = 2;
     start_time = millis();
     next_mode = LEADWAY;
@@ -665,6 +682,34 @@ int leadWay()
   return next_mode;
 }
 
+
+/***********************************/
+/* 功能: 使用机械臂取书              */
+/* 参数: 书籍所在高度                 */
+/************************************/
+void point_book(double book_height)
+{
+  // 舵机对
+  const static double car_book_d = 8;        // 底部舵机-书水平距离(认为定值)
+  const static double arm_length = 10.5;            // 机械臂长度
+  static bool begin_tag = 1;
+
+
+  double base_length = sqrt(car_book_d * car_book_d + book_height * book_height);
+  // theta均为弧度
+  double theta1_1 = atan(book_height / car_book_d);
+  double theta1_2 = acos(base_length / (2 * arm_length));
+  double theta1 = theta1_1 + theta1_2;
+  double theta2 = 2 * asin(base_length / (2 * arm_length));
+
+  servo_arm1.write(180-(theta1 * 180 / PI)-35);
+  servo_arm2.write(180-(theta2 * 180 / PI));
+
+  delay(1000);
+  servo_arm1.write(60);
+  servo_arm2.write(0);
+
+}
 
 /******************************************************************************************************/
 /******************************************************************************************************/
